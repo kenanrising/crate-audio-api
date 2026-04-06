@@ -1,11 +1,18 @@
 """
-fetcher.py — Searches iTunes for a song and returns audio as numpy array.
-Uses ffmpeg subprocess to convert m4a → wav before loading with librosa.
+fetcher.py
+─────────────────────────────────────────────────────────────────────────────
+Searches Deezer for a song and returns a 30-second mp3 preview as a numpy
+array ready for feature extraction.
+
+Deezer Search API:
+ - No API key required, completely free
+ - Returns direct .mp3 preview URLs (no ffmpeg/conversion needed)
+ - Works on any platform, any server, any environment
+─────────────────────────────────────────────────────────────────────────────
 """
 
 import os
 import tempfile
-import subprocess
 import urllib.request
 import urllib.parse
 import json
@@ -18,74 +25,70 @@ warnings.filterwarnings("ignore")
 
 SAMPLE_RATE   = 22050
 CLIP_DURATION = 30.0
-ITUNES_SEARCH = "https://itunes.apple.com/search"
+DEEZER_SEARCH = "https://api.deezer.com/search"
 
 
 def search_song(query: str) -> dict:
-    params = urllib.parse.urlencode({"term": query, "media": "music", "limit": 1, "country": "US"})
+    """Search Deezer for a track. Returns metadata + mp3 preview URL."""
+    params = urllib.parse.urlencode({"q": query, "limit": 1})
     req = urllib.request.Request(
-        f"{ITUNES_SEARCH}?{params}",
+        f"{DEEZER_SEARCH}?{params}",
         headers={"User-Agent": "Mozilla/5.0"}
     )
     with urllib.request.urlopen(req, timeout=10) as r:
         data = json.loads(r.read())
 
-    if data.get("resultCount", 0) == 0:
+    results = data.get("data", [])
+    if not results:
         raise ValueError(f"No results found for '{query}'. Try including the artist name.")
 
-    track = data["results"][0]
-    preview_url = track.get("previewUrl")
+    t = results[0]
+    preview_url = t.get("preview", "")
     if not preview_url:
-        raise ValueError(f"Found '{track.get('trackName')}' but no 30s preview is available.")
+        raise ValueError(f"Found '{t.get('title')}' but no preview is available for this track.")
+
+    # Get album art (Deezer returns 56x56 by default — upgrade to 500x500)
+    artwork = t.get("album", {}).get("cover_xl") or \
+              t.get("album", {}).get("cover_big") or \
+              t.get("album", {}).get("cover", "")
 
     return {
-        "title":        track.get("trackName", "Unknown"),
-        "artist":       track.get("artistName", "Unknown"),
-        "album":        track.get("collectionName", ""),
-        "genre":        track.get("primaryGenreName", ""),
-        "release_year": str(track.get("releaseDate", ""))[:4],
-        "artwork_url":  track.get("artworkUrl100", "").replace("100x100", "400x400"),
+        "title":        t.get("title", "Unknown"),
+        "artist":       t.get("artist", {}).get("name", "Unknown"),
+        "album":        t.get("album", {}).get("title", ""),
+        "genre":        "",   # Deezer search doesn't return genre; could add /track/{id} call
+        "release_year": "",
+        "artwork_url":  artwork,
         "preview_url":  preview_url,
-        "track_id":     str(track.get("trackId", "")),
+        "track_id":     str(t.get("id", "")),
     }
 
 
 def fetch_audio(preview_url: str) -> tuple:
-    """Download preview and decode to numpy array via ffmpeg."""
-    # Download raw audio bytes
-    req = urllib.request.Request(preview_url, headers={"User-Agent": "Mozilla/5.0"})
+    """Download mp3 preview and decode to numpy array with librosa."""
+    req = urllib.request.Request(
+        preview_url,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
     with urllib.request.urlopen(req, timeout=20) as r:
         audio_bytes = r.read()
 
-    # Write to temp file
-    suffix = ".m4a" if "m4a" in preview_url.lower() else ".mp3"
-    tmp_in  = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp_in.write(audio_bytes)
-    tmp_in.close()
-    tmp_wav.close()
+    # Write mp3 to temp file — soundfile + librosa handle mp3 natively
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        f.write(audio_bytes)
+        tmp_path = f.name
 
     try:
-        # Convert to wav using ffmpeg — works on any platform with ffmpeg installed
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_in.name, "-ar", str(SAMPLE_RATE),
-             "-ac", "1", "-t", str(CLIP_DURATION), tmp_wav.name],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg conversion failed: {result.stderr[-300:]}")
-
-        # Load the wav with librosa (soundfile handles wav perfectly)
-        y, sr = librosa.load(tmp_wav.name, sr=SAMPLE_RATE, mono=True, duration=CLIP_DURATION)
+        y, sr = librosa.load(tmp_path, sr=SAMPLE_RATE, mono=True, duration=CLIP_DURATION)
     finally:
-        for f in [tmp_in.name, tmp_wav.name]:
-            if os.path.exists(f):
-                os.unlink(f)
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
     return y, sr
 
 
 def analyze_song(query: str) -> dict:
+    """Full pipeline: search → fetch preview → return metadata + audio array."""
     metadata = search_song(query)
     audio, sr = fetch_audio(metadata["preview_url"])
     return {"metadata": metadata, "audio": audio, "sr": sr}
