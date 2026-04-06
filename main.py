@@ -1,7 +1,6 @@
 """
 main.py — Crate Audio Intelligence API
 """
-import logging
 import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,9 +8,6 @@ from pydantic import BaseModel
 
 from fetcher import analyze_song
 from analyzer import extract_features
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Crate Audio Intelligence API", version="1.0.0")
 
@@ -29,6 +25,16 @@ class AnalyzeRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
+@app.get("/debug")
+def debug():
+    """Test endpoint — runs full pipeline and returns error detail"""
+    try:
+        result   = analyze_song("Bad Guy Billie Eilish")
+        features = extract_features(result["audio"], result["sr"])
+        return {"status": "ok", "bpm": features["bpm"], "key": features["key"]}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
     if not req.song.strip():
@@ -40,10 +46,7 @@ def analyze(req: AnalyzeRequest):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        # Log full traceback so Railway shows it
-        tb = traceback.format_exc()
-        logger.error(f"Analysis error for '{req.song}':\n{tb}")
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}\n{tb}")
+        raise HTTPException(status_code=500, detail={"error": str(e), "traceback": traceback.format_exc()})
 
 if __name__ == "__main__":
     import uvicorn
