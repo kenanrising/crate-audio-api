@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: crate-audio-api
+    runtime: python
+    plan: starter
+    pythonVersion: "3.11.9"
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn main:app --worker-class uvicorn.workers.UvicornWorker --workers 1 --bind 0.0.0.0:$PORT --timeout 120
+    healthCheckPath: /health
