@@ -1,18 +1,11 @@
 """
-fetcher.py
-─────────────────────────────────────────────────────────────────────────────
-Searches for a song by name using the iTunes Search API and returns
-a 30-second audio preview as a numpy array ready for feature extraction.
-
-iTunes Search API:
- - No API key required
- - Returns 30s .m4a previews for 100M+ songs
- - Covers all major artists across every genre
-─────────────────────────────────────────────────────────────────────────────
+fetcher.py — Searches iTunes for a song and returns audio as numpy array.
+Uses ffmpeg subprocess to convert m4a → wav before loading with librosa.
 """
 
 import os
 import tempfile
+import subprocess
 import urllib.request
 import urllib.parse
 import json
@@ -23,23 +16,13 @@ import librosa
 
 warnings.filterwarnings("ignore")
 
-SAMPLE_RATE   = 22050   # librosa default — good balance of quality vs speed
-CLIP_DURATION = 30.0    # full iTunes preview
-
+SAMPLE_RATE   = 22050
+CLIP_DURATION = 30.0
 ITUNES_SEARCH = "https://itunes.apple.com/search"
 
 
 def search_song(query: str) -> dict:
-    """
-    Search iTunes for a song. Returns metadata dict with preview_url.
-    Raises ValueError if nothing found or no preview available.
-    """
-    params = urllib.parse.urlencode({
-        "term":    query,
-        "media":   "music",
-        "limit":   1,
-        "country": "US",
-    })
+    params = urllib.parse.urlencode({"term": query, "media": "music", "limit": 1, "country": "US"})
     req = urllib.request.Request(
         f"{ITUNES_SEARCH}?{params}",
         headers={"User-Agent": "Mozilla/5.0"}
@@ -52,12 +35,8 @@ def search_song(query: str) -> dict:
 
     track = data["results"][0]
     preview_url = track.get("previewUrl")
-
     if not preview_url:
-        raise ValueError(
-            f"Found '{track.get('trackName')}' but Apple Music has no 30s preview for this track. "
-            "Try a different song."
-        )
+        raise ValueError(f"Found '{track.get('trackName')}' but no 30s preview is available.")
 
     return {
         "title":        track.get("trackName", "Unknown"),
@@ -71,36 +50,42 @@ def search_song(query: str) -> dict:
     }
 
 
-def fetch_audio(preview_url: str) -> tuple[np.ndarray, int]:
-    """
-    Download a 30s preview URL and return (audio_array, sample_rate).
-    """
-    req = urllib.request.Request(
-        preview_url,
-        headers={"User-Agent": "Mozilla/5.0"}
-    )
+def fetch_audio(preview_url: str) -> tuple:
+    """Download preview and decode to numpy array via ffmpeg."""
+    # Download raw audio bytes
+    req = urllib.request.Request(preview_url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=20) as r:
         audio_bytes = r.read()
 
-    suffix = ".m4a" if "m4a" in preview_url else ".mp3"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-        f.write(audio_bytes)
-        tmp_path = f.name
+    # Write to temp file
+    suffix = ".m4a" if "m4a" in preview_url.lower() else ".mp3"
+    tmp_in  = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_in.write(audio_bytes)
+    tmp_in.close()
+    tmp_wav.close()
 
     try:
-        y, sr = librosa.load(tmp_path, sr=SAMPLE_RATE, mono=True, duration=CLIP_DURATION)
+        # Convert to wav using ffmpeg — works on any platform with ffmpeg installed
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_in.name, "-ar", str(SAMPLE_RATE),
+             "-ac", "1", "-t", str(CLIP_DURATION), tmp_wav.name],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg conversion failed: {result.stderr[-300:]}")
+
+        # Load the wav with librosa (soundfile handles wav perfectly)
+        y, sr = librosa.load(tmp_wav.name, sr=SAMPLE_RATE, mono=True, duration=CLIP_DURATION)
     finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        for f in [tmp_in.name, tmp_wav.name]:
+            if os.path.exists(f):
+                os.unlink(f)
 
     return y, sr
 
 
 def analyze_song(query: str) -> dict:
-    """
-    Full pipeline: search → fetch preview → return metadata + raw audio.
-    Returns: {"metadata": {...}, "audio": np.ndarray, "sr": int}
-    """
     metadata = search_song(query)
     audio, sr = fetch_audio(metadata["preview_url"])
     return {"metadata": metadata, "audio": audio, "sr": sr}
